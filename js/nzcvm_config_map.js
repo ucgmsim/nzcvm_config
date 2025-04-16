@@ -6,6 +6,10 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
 
+// Variables for location markers from uploaded files
+let locationMarkers = [];
+let locationMarkersLayer = null;
+
 // Define initial parameters for the rectangle
 const initialOriginLat = -41.2865;
 const initialOriginLng = 174.7762;
@@ -51,17 +55,163 @@ let lastPos = null;
 let rotationAngle = 0;
 let rectangleCenter = null;
 
+// Function to handle file upload for location data
+function handleLocationFileUpload(event) {
+    const file = event.target.files[0];
+
+    // If no file is selected (e.g., user cancels the dialog)
+    if (!file) {
+        event.target.value = ''; // Clear the input value if user cancels
+        // Do not clear markers if no file was selected or cancellation occurred
+        return;
+    }
+
+    // A file was selected, clear previous markers
+    clearLocationMarkers(false);
+
+    const reader = new FileReader();
+    reader.onload = function (e) {
+        const contents = e.target.result;
+        const locations = parseLocationFile(file.name.endsWith('.ll'), contents);
+        displayLocationMarkers(locations); // Display new markers
+    };
+    reader.readAsText(file);
+}
+
+// Function to parse the location file content
+function parseLocationFile(isLLFile, fileContent) {
+    const fileHasHeaders = isLLFile ? false : document.getElementById('file-has-headers').checked;
+    if (isLLFile) {
+        fileContent = fileContent.split('\n').map(line => {
+            const parts = line.trim().split(/\s+/);
+            return parts.join(',');
+        }).join('\n');
+    }
+    const locations_results = Papa.parse(fileContent, {
+        header: fileHasHeaders,
+        dynamicTyping: true,
+        skipEmptyLines: true,
+    });
+    if (locations_results.errors.length > 0) {
+        console.error('Error parsing file:', locations_results.errors);
+        alert('Error parsing file. Please check the format.');
+        return [];
+    }
+    var locations = locations_results.data;
+    if (!fileHasHeaders) {
+        // Remove the first row if it contains headers
+        locations = locations.map(element => {
+            return { "lng": element[0], "lat": element[1], "name": element[2] };
+        });
+    }
+
+    console.log(`Parsed ${locations.length} locations from file`);
+    return locations;
+}
+
+// Function to display location markers on the map with optimizations for large datasets
+function displayLocationMarkers(locations) {
+    // Don't proceed if no locations
+    console.log(locations)
+    if (locations.length === 0) return;
+
+    // Create a standard layer group instead of marker cluster
+    locationMarkersLayer = L.layerGroup().addTo(map);
+
+    for (const loc of locations) {
+        // Use circleMarker instead of marker for better performance with large datasets
+        const marker = L.circleMarker([loc.lat, loc.lng], {
+            radius: 4,
+            fillColor: '#3388ff',
+            color: '#fff',
+            weight: 1,
+            opacity: 1,
+            fillOpacity: 0.8,
+            title: loc.label
+        });
+
+        // Add a popup with the name
+        marker.bindPopup(loc.label);
+
+        // Store reference to the original data
+        marker.locationData = loc;
+
+        // Add marker to the collection and track it
+        locationMarkersLayer.addLayer(marker);
+        locationMarkers.push(marker);
+    }
+    // Create bounds that include both markers and rectangle
+    const group = new L.featureGroup([locationMarkersLayer, rectangle]);
+    console.log(group);
+}
+
+// Function to clear all location markers
+function clearLocationMarkers(resetInput = true) { // Parameter controls if file input value is cleared
+    if (locationMarkersLayer) {
+        map.removeLayer(locationMarkersLayer);
+        locationMarkersLayer = null;
+    }
+    locationMarkers = [];
+
+    // Reset the file input element value only if resetInput is true
+    if (resetInput) {
+        const fileInput = document.getElementById('location-file-input');
+        if (fileInput) {
+            fileInput.value = ''; // Clear the selected file in the input
+        }
+        // No need to reset any span text content
+    }
+}
+
+// Add event listener for file upload UI elements when the DOM is loaded
+document.addEventListener('DOMContentLoaded', function () {
+    const locationControls = createLocationUploadControls();
+    document.getElementById('map-container').appendChild(locationControls);
+
+    // Set up the event listener for file input
+    document.getElementById('location-file-input').addEventListener('change', handleLocationFileUpload);
+});
+
+// Create UI controls for location upload
+function createLocationUploadControls() {
+    const controlPanel = document.createElement('div');
+    controlPanel.className = 'location-upload-panel';
+    controlPanel.style.position = 'absolute';
+    controlPanel.style.top = '10px';
+    controlPanel.style.right = '10px';
+    controlPanel.style.zIndex = '1000';
+    controlPanel.style.backgroundColor = 'white';
+    controlPanel.style.padding = '10px';
+    controlPanel.style.borderRadius = '4px';
+    controlPanel.style.boxShadow = '0 0 10px rgba(0,0,0,0.1)';
+
+    controlPanel.innerHTML = `
+        <div style="margin-bottom: 8px; font-weight: bold;">Upload and display locations</div>
+        <div style="margin-bottom: 8px;">Accepted formats: .csv or .ll</div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+            <!-- Standard file input -->
+            <input type="file" id="location-file-input" accept=".csv,.ll" />
+            <div style="display: flex; align-items: center;">
+                <label for="file-has-headers">File has headers (lng, lat, name):</label>
+                <input type="checkbox" id="file-has-headers" checked>
+            </div>
+        </div>
+    `;
+
+    return controlPanel;
+}
+
 // Function to add a legend to the map
 function addLegend() {
     if (legend) {
         map.removeControl(legend);
     }
 
-    legend = L.control({position: 'bottomright'});
-    legend.onAdd = function() {
+    legend = L.control({ position: 'bottomright' });
+    legend.onAdd = function () {
         const div = L.DomUtil.create('div', 'legend');
         div.innerHTML = '<h4>Basin Regions</h4>' +
-                       '<i style="background:#ba0045"></i> Basin Areas<br>';
+            '<i style="background:#ba0045"></i> Basin Areas<br>';
         return div;
     };
     legend.addTo(map);
@@ -126,14 +276,14 @@ function loadGeoJSONByModelVersion(modelVersion) {
         .then(data => {
             // Use performance optimized approach for GeoJSON rendering
             currentGeoJSONLayer = L.geoJSON(data, {
-                style: function() {
+                style: function () {
                     return {
                         color: "#ba0045",
                         weight: 1,
                         fillOpacity: 0.3
                     };
                 },
-                onEachFeature: function(feature, layer) {
+                onEachFeature: function (feature, layer) {
                     if (feature.properties && feature.properties.source_file) {
                         layer.bindTooltip(feature.properties.source_file);
                     }
@@ -178,7 +328,7 @@ function loadGeoJSONByModelVersion(modelVersion) {
             document.getElementById('map-container').appendChild(detailedAlert);
 
             // Add event listener to close button
-            document.getElementById('close-error').addEventListener('click', function() {
+            document.getElementById('close-error').addEventListener('click', function () {
                 document.getElementById('error-message').remove();
             });
 
@@ -191,12 +341,12 @@ function loadGeoJSONByModelVersion(modelVersion) {
 }
 
 // Add change event listener for model version selection
-document.getElementById('model-version').addEventListener('change', function() {
+document.getElementById('model-version').addEventListener('change', function () {
     loadGeoJSONByModelVersion(this.value);
 });
 
 // Load initial GeoJSON based on default selected model version
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     const initialModelVersion = document.getElementById('model-version').value;
     loadGeoJSONByModelVersion(initialModelVersion);
 });
@@ -289,7 +439,7 @@ function updateRotationHandlePosition() {
     }).addTo(map);
 
     // Add click handler to rotation handle
-    rotationHandle.on('mousedown', function(e) {
+    rotationHandle.on('mousedown', function (e) {
         isRotating = true;
         lastPos = e.latlng;
         map.dragging.disable(); // Disable map dragging while rotating
@@ -397,7 +547,7 @@ function updateFormValues() {
 updateFormValues();
 
 // Handle form submission to update rectangle
-document.getElementById('apply-btn').addEventListener('click', function() {
+document.getElementById('apply-btn').addEventListener('click', function () {
     const originLat = parseFloat(document.getElementById('origin-lat').value);
     const originLng = parseFloat(document.getElementById('origin-lng').value);
     const extentX = parseFloat(document.getElementById('extent-x').value);
@@ -485,7 +635,7 @@ function updateResizeHandlePosition() {
     }).addTo(map);
 
     // Add mousedown handler to resize handle
-    resizeHandle.on('mousedown', function(e) {
+    resizeHandle.on('mousedown', function (e) {
         isResizing = true;
         lastPos = e.latlng;
         map.dragging.disable(); // Disable map dragging while resizing
@@ -502,7 +652,7 @@ function updateResizeHandlePosition() {
 }
 
 // Make rectangle interactive
-rectangle.on('mousedown', function(e) {
+rectangle.on('mousedown', function (e) {
     const bounds = rectangle.getBounds();
 
     // Store rectangle center for calculations
@@ -517,7 +667,7 @@ rectangle.on('mousedown', function(e) {
 });
 
 // Handle mouse movement
-document.addEventListener('mousemove', function(e) {
+document.addEventListener('mousemove', function (e) {
     if (!isDragging && !isResizing && !isRotating) return;
 
     // Convert screen position to map coordinates
@@ -613,7 +763,7 @@ document.addEventListener('mousemove', function(e) {
 });
 
 // End interaction on mouseup
-document.addEventListener('mouseup', function() {
+document.addEventListener('mouseup', function () {
     if (!(isDragging || isResizing || isRotating)) return;
 
     // End interaction
@@ -630,14 +780,14 @@ document.addEventListener('mouseup', function() {
 });
 
 // Reset cursor when mouse leaves the rectangle
-rectangle.on('mouseout', function() {
+rectangle.on('mouseout', function () {
     rectangle._path.style.cursor = '';
 });
 
 // Initialize rotation and resize handles
-map.on('layeradd', function(e) {
+map.on('layeradd', function (e) {
     if (e.layer === rectangle) {
-        setTimeout(function() {
+        setTimeout(function () {
             applyRotation();
             createRotationHandle();
             createResizeHandle();
@@ -646,7 +796,7 @@ map.on('layeradd', function(e) {
 });
 
 // Update handles when map changes
-map.on('zoomend moveend dragend zoom move viewreset', function() {
+map.on('zoomend moveend dragend zoom move viewreset', function () {
     if (rectangle) {
         // Ensure rectangle rotation is properly maintained after any map change
         applyRotation();
@@ -654,8 +804,8 @@ map.on('zoomend moveend dragend zoom move viewreset', function() {
 });
 
 // Add event handler for when the map is redrawn
-map.on('redraw', function() {
-    setTimeout(function() {
+map.on('redraw', function () {
+    setTimeout(function () {
         if (rectangle) {
             applyRotation();
         }
@@ -663,7 +813,7 @@ map.on('redraw', function() {
 });
 
 // Initialize rotation and resize handles
-setTimeout(function() {
+setTimeout(function () {
     applyRotation();
 }, 500);
 
